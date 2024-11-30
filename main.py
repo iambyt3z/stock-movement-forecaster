@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from cachetools import TTLCache, cached
 from datetime import date
 from pyhive import hive
 from typing import List, Dict
@@ -21,6 +22,8 @@ app.add_middleware(
 conn = hive.Connection(host='localhost', port=10000, username='siddhant', database='default')
 cursor = conn.cursor()
 
+cache = TTLCache(maxsize=1000, ttl=300)
+
 company_database_name = {
     "AMERICAN EXPRESS COMPANY": "amex_findata",
     "BANK OF AMERICA, NATIONAL ASSOCIATION": "boa_findata",
@@ -40,19 +43,13 @@ async def get_company_data(
     start_date: date,
     end_date: date,
     complaints_count: int
-):
-    """
-    Get complaint data for a specific company between a given date range.
-
-    - **company_name**: The name of the company to filter the complaints data.
-    - **start_date**: The start date to filter complaints based on when they were received.
-    - **end_date**: The end date to filter complaints based on when they were received.
-    - **complaints_count**: The maximum number of complaints to return.
-
-    Returns a list of complaints filtered by the given parameters.
-    """
+):    
     if company_name not in company_database_name:
         return {"error": "Company not found"}
+    
+    cache_key = f"{company_name}_{start_date}_{end_date}"
+    if cache_key in cache:
+        return cache[cache_key]
     
     query = f"""
         SELECT 
@@ -94,6 +91,8 @@ async def get_company_data(
         }
 
         response.append(formatted_row)
+
+    cache[cache_key] = response
 
     return response
 
