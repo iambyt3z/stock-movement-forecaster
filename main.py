@@ -1,9 +1,11 @@
 from fastapi import FastAPI
+from fastapi import HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from cachetools import TTLCache, cached
 from datetime import date
 from pyhive import hive
 from typing import List, Dict
+import joblib
 
 app = FastAPI()
 
@@ -37,62 +39,74 @@ company_database_name = {
     "WELLS FARGO & COMPANY": "wellsfargo_findata"
 }
 
-@app.get("/company", response_model = List[Dict[str, str]])
+model = joblib.load('gradient_boosting_model.pkl')
+
+@app.get("/company", response_model = dict)
 async def get_company_data(
     company_name: str,
+    company_name_encoded: int,
     start_date: date,
     end_date: date,
-    complaints_count: int
-):    
+    complaints_count: int,
+    open_price: float,
+    close_price: float
+):  
     if company_name not in company_database_name:
-        return {"error": "Company not found"}
+        raise HTTPException(status_code=404, detail="Company not found")
+    
+    probs = model.predict_proba([[company_name_encoded, complaints_count, open_price, close_price]])[0]
+    prob_close_price_drop = probs[2]
+    plot_data = []
     
     cache_key = f"{company_name}_{start_date}_{end_date}"
     if cache_key in cache:
-        return cache[cache_key]
+        plot_data = cache[cache_key]
     
-    query = f"""
-        SELECT 
+    else:
+        query = f"""
+        SELECT
             c.date_received AS `date`,
             c.company,
             COUNT(c.complaint_id) AS complaint_count,
-            f.open_price AS open_price,
-            f.high_price AS high_price,
-            f.low_price AS low_price,
-            f.close_price AS close_price
-        FROM 
+            f.close_price AS close_price,
+            f.close_price - LAG(f.close_price) OVER (
+                PARTITION BY c.company 
+                ORDER BY c.date_received
+            ) AS close_price_difference
+        FROM
             complaints c
-        JOIN 
+        JOIN
             {company_database_name[company_name]} f
-        ON 
+        ON
             f.trade_date = DATE_SUB(c.date_received, 1)
         WHERE
             c.company = '{company_name}'
             AND c.date_received BETWEEN '{start_date}' AND '{end_date}'
-        GROUP BY 
-            c.date_received, c.company, f.open_price, f.high_price, f.low_price, f.close_price
-        ORDER BY 
-            c.date_received, c.company
-    """
+        GROUP BY
+            c.date_received, c.company, f.close_price
+        ORDER BY
+            c.date_received
+        """
 
-    cursor.execute(query)
-    rows = cursor.fetchall()
+        cursor.execute(query)
+        rows = cursor.fetchall()
 
-    response = []
-    for row in rows:
-        formatted_row = {
-            "date": str(row[0]),
-            "company": str(row[1]),
-            "complaint_count": str(row[2]),
-            "open_price": str(row[3]),
-            "high_price": str(row[4]),
-            "low_price": str(row[5]),
-            "close_price": str(row[6])
-        }
+        for row in rows:
+            formatted_row = {
+                "date": str(row[0]),
+                "company": str(row[1]),
+                "complaint_count": str(row[2]),
+                "close_price": str(row[3]),
+                "close_price_difference": str(row[4]) if row[4] is not None else "0"
+            }
 
-        response.append(formatted_row)
+            plot_data.append(formatted_row)
 
-    cache[cache_key] = response
+        cache[cache_key] = plot_data
+
+    response = {
+        "prob_close_price_drop": prob_close_price_drop,
+        "plot_data": plot_data
+    }
 
     return response
-
